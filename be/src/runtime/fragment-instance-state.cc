@@ -358,6 +358,7 @@ void FragmentInstanceState::ReportProfileThread() {
 }
 
 void FragmentInstanceState::SendReport(bool done, const Status& status) {
+  VLOG_QUERY << "SendReport(): done=" << (done ? "true" : "false") << " status=" << status;
   DCHECK(status.ok() || done);
   DCHECK(runtime_state_ != nullptr);
 

@@ -45,6 +45,7 @@ add_library(Runtime
   hbase-table.cc
   hbase-table-factory.cc
   hdfs-fs-cache.cc
+  insert-exec-state.cc
   lib-cache.cc
   mem-tracker.cc
   mem-pool.cc

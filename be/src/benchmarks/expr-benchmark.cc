@@ -54,6 +54,7 @@
 #include "runtime/mem-tracker.h"
 #include "service/fe-support.h"
 #include "service/impala-server.h"
+#include "service/frontend.h"
 
 #include "common/names.h"
 

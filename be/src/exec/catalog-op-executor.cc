@@ -27,6 +27,7 @@
 #include "runtime/exec-env.h"
 #include "service/impala-server.h"
 #include "service/hs2-util.h"
+#include "service/frontend.h"
 #include "util/string-parser.h"
 #include "util/runtime-profile-counters.h"
 #include "gen-cpp/CatalogService.h"

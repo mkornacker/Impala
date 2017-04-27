@@ -363,49 +363,47 @@ struct TPlanExecInfo {
 
 // Result of call to ImpalaPlanService/JniFrontend.CreateQueryRequest()
 struct TQueryExecRequest {
-  // global descriptor tbl for all fragments
-  1: optional Descriptors.TDescriptorTable desc_tbl
-
   // exec info for all plans; the first one materializes the query result
-  2: optional list<TPlanExecInfo> plan_exec_info
+  1: optional list<TPlanExecInfo> plan_exec_info
 
   // Metadata of the query result set (only for select)
-  3: optional Results.TResultSetMetadata result_set_metadata
+  2: optional Results.TResultSetMetadata result_set_metadata
 
   // Set if the query needs finalization after it executes
-  4: optional TFinalizeParams finalize_params
+  3: optional TFinalizeParams finalize_params
 
-  5: required ImpalaInternalService.TQueryCtx query_ctx
+  // contains the global descriptor table for all fragments
+  4: required ImpalaInternalService.TQueryCtx query_ctx
 
   // The same as the output of 'explain <query>'
-  6: optional string query_plan
+  5: optional string query_plan
 
   // The statement type governs when the coordinator can judge a query to be finished.
   // DML queries are complete after Wait(), SELECTs may not be. Generally matches
   // the stmt_type of the parent TExecRequest, but in some cases (such as CREATE TABLE
   // AS SELECT), these may differ.
-  7: required Types.TStmtType stmt_type
+  6: required Types.TStmtType stmt_type
 
   // Estimated per-host peak memory consumption in bytes. Used for resource management.
-  8: optional i64 per_host_mem_estimate
+  7: optional i64 per_host_mem_estimate
 
   // Minimum query-wide buffer reservation required per host in bytes. This is the peak
   // minimum reservation that may be required by the concurrently-executing operators at
   // any point in query execution. It may be less than the initial reservation total
   // claims (below) if execution of some operators never overlaps, which allows reuse of
   // reservations.
-  9: optional i64 per_host_min_reservation;
+  8: optional i64 per_host_min_reservation;
 
   // Total of the initial buffer reservations that we expect to be claimed per host.
   // I.e. the sum over all operators in all fragment instances that execute on that host.
   // Measured in bytes.
-  10: optional i64 per_host_initial_reservation_total_claims;
+  9: optional i64 per_host_initial_reservation_total_claims;
 
   // List of replica hosts.  Used by the host_idx field of TScanRangeLocation.
-  11: required list<Types.TNetworkAddress> host_list
+  10: required list<Types.TNetworkAddress> host_list
 
   // Column lineage graph
-  12: optional LineageGraph.TLineageGraph lineage_graph
+  11: optional LineageGraph.TLineageGraph lineage_graph
 }
 
 enum TCatalogOpType {

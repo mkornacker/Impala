@@ -35,6 +35,7 @@
 #include "common/version.h"
 #include "rpc/thrift-util.h"
 #include "runtime/raw-value.h"
+#include "runtime/coordinator.h"
 #include "runtime/exec-env.h"
 #include "service/hs2-util.h"
 #include "service/client-request-state.h"

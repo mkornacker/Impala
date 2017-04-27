@@ -21,6 +21,7 @@
 #include <gutil/strings/substitute.h>
 
 #include "runtime/mem-tracker.h"
+#include "runtime/coordinator.h"
 #include "runtime/row-batch.h"
 #include "runtime/runtime-state.h"
 #include "runtime/exec-env.h"
@@ -554,7 +555,7 @@ void ClientRequestState::Done() {
   // must happen before taking lock_ below.
   if (coord_.get() != NULL) {
     // This is safe to access on coord_ after Wait() has been called.
-    uint64_t latest_kudu_ts = coord_->GetLatestKuduInsertTimestamp();
+    uint64_t latest_kudu_ts = coord_->insert_exec_state()->GetLatestKuduInsertTimestamp();
     if (latest_kudu_ts > 0) {
       VLOG_RPC << "Updating session (id=" << session_id()  << ") with latest "
                << "observed Kudu timestamp: " << latest_kudu_ts;
@@ -889,7 +890,7 @@ Status ClientRequestState::Cancel(bool check_inflight, const Status* cause) {
 
   // Cancel the parent query. 'lock_' should not be held because cancellation involves
   // RPCs and can block for a long time.
-  if (coord != NULL) coord->Cancel(cause);
+  if (coord != NULL) coord->Cancel();
   return Status::OK();
 }
 
@@ -908,7 +909,7 @@ Status ClientRequestState::UpdateCatalog() {
     TUpdateCatalogRequest catalog_update;
     catalog_update.__set_header(TCatalogServiceRequestHeader());
     catalog_update.header.__set_requesting_user(effective_user());
-    if (!coord()->PrepareCatalogUpdate(&catalog_update)) {
+    if (!coord()->insert_exec_state()->PrepareCatalogUpdate(&catalog_update)) {
       VLOG_QUERY << "No partitions altered, not updating metastore (query id: "
                  << query_id() << ")";
     } else {
@@ -1001,9 +1002,7 @@ void ClientRequestState::SetCreateTableAsSelectResultSet() {
   // operation.
   if (catalog_op_executor_->ddl_exec_response()->new_table_created) {
     DCHECK(coord_.get());
-    for (const PartitionStatusMap::value_type& p: coord_->per_partition_status()) {
-      total_num_rows_inserted += p.second.num_modified_rows;
-    }
+    total_num_rows_inserted = coord_->insert_exec_state()->GetNumModifiedRows();
   }
   const string& summary_msg = Substitute("Inserted $0 row(s)", total_num_rows_inserted);
   VLOG_QUERY << summary_msg;

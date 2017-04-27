@@ -148,8 +148,8 @@ public class PlannerTestBase extends FrontendTestBase {
         }
       }
     }
-    if (execRequest.isSetDesc_tbl()) {
-      TDescriptorTable descTbl = execRequest.desc_tbl;
+    if (execRequest.query_ctx.isSetDesc_tbl()) {
+      TDescriptorTable descTbl = execRequest.query_ctx.desc_tbl;
       for (TTupleDescriptor tupleDesc: descTbl.tupleDescriptors) {
         tupleMap_.put(tupleDesc.id, tupleDesc);
       }
@@ -229,8 +229,9 @@ public class PlannerTestBase extends FrontendTestBase {
     boolean first = true;
     // Iterate through all partitions of the descriptor table and verify all partitions
     // are referenced.
-    if (execRequest.isSetDesc_tbl() && execRequest.desc_tbl.isSetTableDescriptors()) {
-      for (TTableDescriptor tableDesc: execRequest.desc_tbl.tableDescriptors) {
+    if (execRequest.query_ctx.isSetDesc_tbl()
+        && execRequest.query_ctx.desc_tbl.isSetTableDescriptors()) {
+      for (TTableDescriptor tableDesc: execRequest.query_ctx.desc_tbl.tableDescriptors) {
         // All partitions of insertTableId are okay.
         if (tableDesc.getId() == insertTableId) continue;
         if (!tableDesc.isSetHdfsTable()) continue;
@@ -438,8 +439,8 @@ public class PlannerTestBase extends FrontendTestBase {
     if (request == null || !request.isSetQuery_exec_request()) return;
     TQueryExecRequest execRequest = request.query_exec_request;
     HashSet<Integer> seenTableIds = Sets.newHashSet();
-    if (execRequest.isSetDesc_tbl()) {
-      TDescriptorTable descTbl = execRequest.desc_tbl;
+    if (execRequest.query_ctx.isSetDesc_tbl()) {
+      TDescriptorTable descTbl = execRequest.query_ctx.desc_tbl;
       if (descTbl.isSetTableDescriptors()) {
         for (TTableDescriptor tableDesc: descTbl.tableDescriptors) {
           if (seenTableIds.contains(tableDesc.id)) {
@@ -490,6 +491,7 @@ public class PlannerTestBase extends FrontendTestBase {
       StringBuilder errorLog, StringBuilder actualOutput) {
     String query = testCase.getQuery();
     queryCtx.client_request.setStmt(query);
+    queryCtx.unsetDesc_tbl();  // can contain descriptors with missing required fields
     TQueryOptions queryOptions = queryCtx.client_request.getQuery_options();
     if (section == Section.PLAN) {
       queryOptions.setNum_nodes(1);

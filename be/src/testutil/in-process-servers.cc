@@ -29,6 +29,7 @@
 #include "util/metrics.h"
 #include "runtime/exec-env.h"
 #include "service/impala-server.h"
+#include "service/frontend.h"
 
 #include "common/names.h"
 

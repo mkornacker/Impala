@@ -201,19 +201,13 @@ void QueryState::ReportExecStatusAux(bool done, const Status& status,
       instance_status.__isset.profile = true;
     }
 
-    // Only send updates to insert status if fragment is finished, the coordinator waits
-    // until query execution is done to use them anyhow.
-    RuntimeState* state = fis->runtime_state();
-    if (done && (state->hdfs_files_to_move()->size() > 0
-        || state->per_partition_status()->size() > 0)) {
-      TInsertExecStatus insert_status;
-      if (state->hdfs_files_to_move()->size() > 0) {
-        insert_status.__set_files_to_move(*state->hdfs_files_to_move());
-      }
-      if (state->per_partition_status()->size() > 0) {
-        insert_status.__set_per_partition_status(*state->per_partition_status());
-      }
-      params.__set_insert_exec_status(insert_status);
+    // Only send updates to insert status if fragment is finished, the coordinator
+    // waits until query execution is done to use them anyhow.
+    if (done && fis->runtime_state()->insert_exec_state()->has_changes()) {
+    //if (done && (state->hdfs_files_to_move()->size() > 0
+        //|| state->per_partition_status()->size() > 0)) {
+      fis->runtime_state()->insert_exec_state()->ToThrift(&params.insert_exec_status);
+      params.__isset.insert_exec_status = true;
     }
 
     // Send new errors to coordinator
@@ -331,7 +325,6 @@ void QueryState::ExecFInstance(FragmentInstanceState* fis) {
 }
 
 void QueryState::Cancel() {
-  VLOG_QUERY << "Cancel: query_id=" << query_id();
   (void) instances_prepared_promise_.Get();
   if (!is_cancelled_.CompareAndSwap(0, 1)) return;
   for (auto entry: fis_map_) entry.second->Cancel();

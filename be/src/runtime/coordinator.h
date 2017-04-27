@@ -38,7 +38,8 @@
 #include "common/status.h"
 #include "gen-cpp/Frontend_types.h"
 #include "gen-cpp/Types_types.h"
-#include "runtime/runtime-state.h" // for PartitionStatusMap; TODO: disentangle
+#include "runtime/query-state.h"
+#include "runtime/insert-exec-state.h"
 #include "scheduling/query-schedule.h"
 #include "util/progress-updater.h"
 
@@ -63,9 +64,7 @@ class QueryState;
 /// TQueryExecRequest. As part of that, it handles all interactions with the executing
 /// backends; it is also responsible for implementing all client requests regarding the
 /// query, including cancellation. Once a query ends, either through cancellation or
-/// by returning eos, the coordinator releases resources. (Note that DML requests
-/// always end with cancellation, via ImpalaServer::UnregisterQuery()/
-/// ImpalaServer::CancelInternal()/ClientRequestState::Cancel().)
+/// by returning eos, or by finalizing a DML request, the coordinator releases resources.
 ///
 /// The coordinator monitors the execution status of fragment instances and aborts the
 /// entire query if an error is reported by any of them.
@@ -75,21 +74,27 @@ class QueryState;
 /// the coordinator.
 ///
 /// Thread-safe, with the exception of GetNext().
-//
+///
 /// A typical sequence of calls for a single query (calls under the same numbered
 /// item can happen concurrently):
 /// 1. client: Exec()
 /// 2. client: Wait()/client: Cancel()/backend: UpdateBackendExecStatus()
 /// 3. client: GetNext()*/client: Cancel()/backend: UpdateBackendExecStatus()
 ///
-/// The implementation ensures that setting an overall error status and initiating
-/// cancellation of all fragment instances is atomic.
+/// Query status and cancellation:
+/// 1. When an error is encountered, execution is automatically cancelled and the
+/// overall query status is set to the first encountered error status.
+/// 2. When a query is cancelled via an explicit Cancel() call, the overall query
+/// status is also set to CANCELLED and cancellation is initiated for all
+/// backends still executing (without an error status).
+/// 3. Once a query has returned all rows, cancellation of the remaining executing
+/// backends is initiated automatically. The overall query status is OK.
 ///
+/// Thread-safe, unless stated otherwise.
+///
+/// TODO: initiate cancellation when Exec() fails
 /// TODO: move into separate subdirectory and move nested classes into separate files
 /// and unnest them
-/// TODO: clean up locking behavior; in particular, clarify dependency on lock_
-/// TODO: clarify cancellation path; in particular, cancel as soon as we return
-/// all results
 class Coordinator { // NOLINT: The member variables could be re-ordered to save space
  public:
   Coordinator(const QuerySchedule& schedule, RuntimeProfile::EventSequence* events);
@@ -102,7 +107,8 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
 
   /// Blocks until result rows are ready to be retrieved via GetNext(), or, if the
   /// query doesn't return rows, until the query finishes or is cancelled.
-  /// A call to Wait() must precede all calls to GetNext().
+  /// A call to Wait() must precede all calls to GetNext(), and is required for
+  /// DML requests. Releases resources in case of error.
   /// Multiple calls to Wait() are idempotent and it is okay to issue multiple
   /// Wait() calls concurrently.
   Status Wait() WARN_UNUSED_RESULT;
@@ -117,21 +123,20 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// or have failed.
   ///
   /// Returns an error status if an error was encountered either locally or by any of the
-  /// remote fragments or if the query was cancelled.
+  /// remote fragments or if the query was cancelled. Releases resources in case of error.
   ///
   /// GetNext() is not thread-safe: multiple threads must not make concurrent GetNext()
   /// calls (but may call any of the other member functions concurrently with GetNext()).
   Status GetNext(QueryResultSet* results, int max_rows, bool* eos) WARN_UNUSED_RESULT;
 
-  /// Cancel execution of query. This includes the execution of the local plan fragment,
-  /// if any, as well as all plan fragments on remote nodes. Sets query_status_ to the
-  /// given cause if non-NULL. Otherwise, sets query_status_ to Status::CANCELLED.
-  /// Idempotent.
-  void Cancel(const Status* cause = nullptr);
+  /// Cancel execution of query, if it is still executing. This includes the execution
+  /// of the local plan fragment, if any, as well as all plan fragments on remote
+  /// nodes. Sets query status to CANCELLED. Idempotent.
+  void Cancel();
 
-  /// Updates execution status of a particular backend as well as Insert-related
-  /// status (per_partition_status_ and files_to_move_). Also updates
-  /// num_remaining_backends_ and cancels execution if the backend has an error status.
+  /// Updates execution status of a particular backend as well as insert_exec_state_.
+  /// Also updates num_remaining_backends_ and cancels execution if the backend has an
+  /// error status.
   Status UpdateBackendExecStatus(const TReportExecStatusParams& params)
       WARN_UNUSED_RESULT;
 
@@ -152,30 +157,16 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   RuntimeProfile* query_profile() const { return query_profile_.get(); }
 
   const TUniqueId& query_id() const;
-
   MemTracker* query_mem_tracker() const;
 
   /// This is safe to call only after Wait()
-  const PartitionStatusMap& per_partition_status() { return per_partition_status_; }
-
-  /// Returns the latest Kudu timestamp observed across any backends where DML into Kudu
-  /// was executed, or 0 if there were no Kudu timestamps reported.
-  /// This should only be called after Wait().
-  uint64_t GetLatestKuduInsertTimestamp() const;
-
-  /// Gathers all updates to the catalog required once this query has completed execution.
-  /// Returns true if a catalog update is required, false otherwise.
-  /// Must only be called after Wait()
-  bool PrepareCatalogUpdate(TUpdateCatalogRequest* catalog_update);
+  InsertExecState* insert_exec_state() { return &insert_exec_state_; }
 
   /// Return error log for coord and all the fragments. The error messages from the
   /// individual fragment instances are merged into a single output to retain readability.
   std::string GetErrorLog();
 
   const ProgressUpdater& progress() { return progress_; }
-
-  /// Returns query_status_.
-  Status GetStatus();
 
   /// Get a copy of the current exec summary. Thread-safe.
   void GetTExecSummary(TExecSummary* exec_summary);
@@ -194,9 +185,6 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
 
   const QuerySchedule schedule_;
 
-  /// copied from TQueryExecRequest; constant across all fragments
-  TQueryCtx query_ctx_;
-
   /// copied from TQueryExecRequest, governs when to call ReportQuerySummary
   TStmtType::type stmt_type_;
 
@@ -208,7 +196,7 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   // index into backend_states_ for coordinator fragment; -1 if no coordinator fragment
   int coord_backend_idx_ = -1;
 
-  /// The QueryState for this coordinator. Set in Exec(). Released in TearDown().
+  /// The QueryState for this coordinator. Set in Exec(), released in d'tor.
   QueryState* query_state_ = nullptr;
 
   /// Non-null if and only if the query produces results for the client; i.e. is of
@@ -226,12 +214,6 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// Not owned by this class. Set in Exec(). Reset to nullptr in TearDown() or when
   /// GetNext() hits eos.
   PlanRootSink* coord_sink_ = nullptr;
-
-  /// True if the query needs a post-execution step to tidy up
-  bool needs_finalization_ = false;
-
-  /// Only valid if needs_finalization is true
-  TFinalizeParams finalize_params_;
 
   /// ensures single-threaded execution of Wait(); must not hold lock_ when acquiring this
   boost::mutex wait_lock_;
@@ -272,65 +254,60 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
 
   ExecSummary exec_summary_;
 
+  /// Filled in as the query completes and tracks the results of INSERT queries that
+  /// alter the structure of tables. This is either the union of the reports from all
+  /// fragment instances, or taken from the coordinator fragment: only one of the two can
+  /// legitimately produce updates.
+  InsertExecState insert_exec_state_;
+
   /// Aggregate counters for the entire query.
   boost::scoped_ptr<RuntimeProfile> query_profile_;
 
-  /// Protects all fields below. This is held while making RPCs, so this lock should
-  /// only be acquired if the acquiring thread is prepared to wait for a significant
-  /// time.
-  /// TODO: clarify to what extent the fields below need to be protected by lock_
-  /// Lock ordering is
-  /// 1. lock_
-  /// 2. BackendState::lock_
-  boost::mutex lock_;
+  /// Barrier that is released when all calls to BackendState::Exec() have
+  /// returned. Initialized in StartBackendExec().
+  boost::scoped_ptr<CountingBarrier> exec_rpcs_complete_barrier_;
 
-  /// Overall status of the entire query; set to the first reported fragment error
-  /// status or to CANCELLED, if Cancel() is called.
-  Status query_status_;
-
-  /// If true, the query is done returning all results.  It is possible that the
-  /// coordinator still needs to wait for cleanup on remote fragments (e.g. queries
-  /// with limit)
-  /// Once this is set to true, errors from execution backends are ignored.
-  bool returned_all_results_ = false;
-
-  /// If there is no coordinator fragment, Wait() simply waits until all
-  /// backends report completion by notifying on backend_completion_cv_.
-  /// Tied to lock_.
-  boost::condition_variable backend_completion_cv_;
-
-  /// Count of the number of backends for which done != true. When this
-  /// hits 0, any Wait()'ing thread is notified
-  int num_remaining_backends_ = 0;
-
-  /// The following two structures, partition_row_counts_ and files_to_move_ are filled in
-  /// as the query completes, and track the results of INSERT queries that alter the
-  /// structure of tables. They are either the union of the reports from all fragment
-  /// instances, or taken from the coordinator fragment: only one of the two can
-  /// legitimately produce updates.
-
-  /// The set of partitions that have been written to or updated by all fragment
-  /// instances, along with statistics such as the number of rows written (may be 0). For
-  /// unpartitioned tables, the empty string denotes the entire table.
-  PartitionStatusMap per_partition_status_;
-
-  /// The set of files to move after an INSERT query has run, in (src, dest) form. An
-  /// empty string for the destination means that a file is to be deleted.
-  FileMoveMap files_to_move_;
+  /// Barrier that is released when all backends have indicated execution completion
+  /// or when any execution error occured. Initialized in StartBackendExec().
+  boost::scoped_ptr<CountingBarrier> backend_exec_complete_barrier_;
 
   /// Event timeline for this query. Not owned.
   RuntimeProfile::EventSequence* query_events_ = nullptr;
 
-  /// Indexed by fragment idx (TPlanFragment.idx). Filled in InitFragmentStats(),
-  /// elements live in obj_pool().
-  std::vector<FragmentStats*> fragment_stats_;
-
   /// total time spent in finalization (typically 0 except for INSERT into hdfs tables)
   RuntimeProfile::Counter* finalization_timer_ = nullptr;
 
-  /// Barrier that is released when all calls to ExecRemoteFragment() have
-  /// returned, successfully or not. Initialised during Exec().
-  boost::scoped_ptr<CountingBarrier> exec_complete_barrier_;
+  /// Indexed by fragment idx (TPlanFragment.idx). Filled in InitFragmentStats(),
+  /// elements live in obj_pool().
+  /// Updated by BackendState sequentially, without synchronization.
+  std::vector<FragmentStats*> fragment_stats_;
+
+  /// EXECUTING: in-flight, non-error execution; the only non-terminal state
+  /// RETURNED_RESULTS: GetNext() set eos to true
+  /// CANCELLED: Cancel() was called (not: someone called CancelInternal())
+  /// ERROR: received an error from a backend
+  /// ERROR_AFTER_RETURNED_RESULTS: received an error from a backend after GetNext()
+  ///   set eos to true
+  enum class ExecState {
+      EXECUTING, RETURNED_RESULTS, CANCELLED, ERROR, ERROR_AFTER_RETURNED_RESULTS };
+
+  SpinLock exec_state_lock_;  // protects exec_state_ and exec_status_
+
+  /// In the ERROR case, we might initially see a CANCELLED fragment instance
+  /// status before an error status from the same backend shows up (one instance's
+  /// execution error kicked off the cancellation of all instances, and one of the
+  /// cancelled instances status report might shows up before the error report).
+  /// This will get fixed when execution status is reported per-QueryState, as opposed
+  /// to the current per-FIS.
+  ExecState exec_state_ = ExecState::EXECUTING;
+
+  /// overall execution status; only set on exec_state_ transitions:
+  /// - EXECUTING: OK
+  /// - RETURNED_RESULTS: OK
+  /// - CANCELLED: CANCELLED
+  /// - ERROR: error status
+  /// - ERROR_AFTER_RETURNED_RESULTS: OK
+  Status exec_status_;
 
   /// Protects filter_routing_table_.
   SpinLock filter_lock_;
@@ -349,28 +326,54 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// Returns a local object pool.
   ObjectPool* obj_pool() { return obj_pool_.get(); }
 
+  /// Returns request's finalize params, or nullptr if not present.
+  const TFinalizeParams* finalize_params() const;
+
+  const TQueryCtx& query_ctx() const { return schedule_.request().query_ctx; }
+
   /// Returns a pretty-printed table of the current filter state.
   std::string FilterDebugString();
 
-  /// Cancels all fragment instances. Assumes that lock_ is held. This may be called when
-  /// the query is not being cancelled in the case where the query limit is reached.
+  /// Cancels all fragment instances, computes the query summary and releases resources.
+  /// Must be called exactly once when transitioning to one of {ERROR,
+  /// ERROR_AFTER_RETURNED_RESULTS, CANCELLED}.
   void CancelInternal();
 
-  /// Acquires lock_ and updates query_status_ with 'status' if it's not already
-  /// an error status, and returns the current query_status_.
-  /// Calls CancelInternal() when switching to an error status.
+  /// Release execution resources. Not idempotent.
+  void ReleaseResources();
+
+  /// If exec_state_ != EXECUTING, does nothing. Otherwise sets exec_state_ to 'state'
+  /// and finalizes execution (cancels remaining fragments if transitioning to CANCELLED;
+  /// either way, calls ComputeQuerySummary() and releases resources).
+  void SetNonErrorTerminalState(ExecState state);
+
+  /// Transitions exec_state_ given a backend error status:
+  /// - if exec_state_ already indicates an error, does nothing
+  /// - transitions EXECUTING to ERROR and RETURNED_RESULTS to
+  ///   ERROR_AFTER_RETURNED_RESULTS
+  /// Also updates exec_status_ when transitioning to ERROR (or if we're already in
+  /// ERROR, if exec_status_ is CANCELLED, because a backend might have a more interesting
+  /// error status; TODO: remove that when switching to per-backend error reporting).
+  /// When transitioning for the first time to an error state, calls CancelInternal().
+  ///
   /// failed_fragment is the fragment_id that has failed, used for error reporting along
   /// with instance_hostname.
-  Status UpdateStatus(const Status& status, const TUniqueId& failed_fragment,
-      const std::string& instance_hostname) WARN_UNUSED_RESULT;
+  Status SetErrorState(const Status& status,
+      const TUniqueId* failed_fragment, const std::string& instance_hostname)
+      WARN_UNUSED_RESULT;
 
-  /// Update per_partition_status_ and files_to_move_.
-  void UpdateInsertExecStatus(const TInsertExecStatus& insert_exec_status);
+  /// If status is an error status, calls SetErrorState(), otherwise returns
+  /// query_status_.
+  Status UpdateExecStateOnError(const Status& status,
+      const TUniqueId* failed_fragment, const std::string& instance_hostname)
+      WARN_UNUSED_RESULT;
 
-  /// Returns only when either all execution backends have reported success or the query
-  /// is in error. Returns the status of the query.
-  /// It is safe to call this concurrently, but any calls must be made only after Exec().
-  Status WaitForBackendCompletion() WARN_UNUSED_RESULT;
+  /// Return true if exec_state_is EXECUTING, false otherwise.
+  /// Thread-safe.
+  bool IsExecuting();
+
+  /// Returns exec_status_. Thread-safe.
+  Status GetExecStatus();
 
   /// Initializes fragment_stats_ and query_profile_. Must be called before
   /// InitBackendStates().
@@ -382,28 +385,9 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   void InitBackendStates();
 
   /// Computes execution summary info strings for fragment_stats_ and query_profile_.
-  /// This is assumed to be called at the end of a query -- remote fragments'
+  /// This waits for backend_exec_complete_barrier_, remote fragments'
   /// profiles must not be updated while this is running.
   void ComputeQuerySummary();
-
-  /// TODO: move the next 3 functions into a separate class
-
-  /// Determines what the permissions of directories created by INSERT statements should
-  /// be if permission inheritance is enabled. Populates a map from all prefixes of
-  /// path_str (including the full path itself) which is a path in Hdfs, to pairs
-  /// (does_not_exist, permissions), where does_not_exist is true if the path does not
-  /// exist in Hdfs. If does_not_exist is true, permissions is set to the permissions of
-  /// the most immediate ancestor of the path that does exist, i.e. the permissions that
-  /// the path should inherit when created. Otherwise permissions is set to the actual
-  /// permissions of the path. The PermissionCache argument is also used to cache the
-  /// output across repeated calls, to avoid repeatedly calling hdfsGetPathInfo() on the
-  /// same path.
-  typedef boost::unordered_map<std::string, std::pair<bool, short>> PermissionCache;
-  void PopulatePathPermissionCache(hdfsFS fs, const std::string& path_str,
-      PermissionCache* permissions_cache);
-
-  /// Moves all temporary staging files to their final destinations.
-  Status FinalizeSuccessfulInsert() WARN_UNUSED_RESULT;
 
   /// Perform any post-query cleanup required. Called by Wait() only after all fragment
   /// instances have returned, or if the query has failed, in which case it only cleans up
@@ -411,7 +395,7 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   Status FinalizeQuery() WARN_UNUSED_RESULT;
 
   /// Populates backend_states_, starts query execution at all backends in parallel, and
-  /// blocks until startup completes.
+  /// blocks until startup completes (exec_rpcs_complete_barrier_).
   void StartBackendExec();
 
   /// Calls CancelInternal() and returns an error if there was any error starting
@@ -422,10 +406,6 @@ class Coordinator { // NOLINT: The member variables could be re-ordered to save 
   /// Build the filter routing table by iterating over all plan nodes and collecting the
   /// filters that they either produce or consume.
   void InitFilterRoutingTable();
-
-  /// Releases filter resources, unregisters the filter mem tracker, and calls
-  /// CloseConsumer() on coord_sink_. Requires lock_ to be held. Idempotent.
-  void ReleaseResources();
 };
 
 }
