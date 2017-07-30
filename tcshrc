@@ -1,0 +1,22 @@
+bindkey -v
+set prompt='%~ %!> '
+set autolist
+set addsuffix
+set complete=enhance
+set fignore=(\~)
+
+alias ls ls -F
+
+alias gs git status
+alias gb git branch
+alias gco git checkout
+alias gl git log --graph --full-history --all --color --pretty=format:"%x1b[31m%h%x09%x1b[32m%d%x1b[0m%x20%s"
+alias msql mysql -hlocalhost -u marcel -pmarcel
+alias desktop ssh marcel@172.21.2.72
+alias sc /home/marcel/impala/bin/start-impala-cluster.py
+alias scr /home/marcel/impala/bin/start-impala-cluster.py -r
+alias loadsnap ~/impala-auxiliary-tests/jenkins/download-latest-snapshot.py --jenkins_job_name=impala-asf-master-core-data-load
+
+set JAVA_HOME=/usr/lib/jvm/java-7-oracle
+set LD_LIBRARY_PATH=/usr/lib/jvm/java-7-oracle/jre/lib/amd64/server:/usr/lib/jvm/java-7-oracle/jre/lib/amd64
+set GERRIT_USER=kornackerm@acm.org
